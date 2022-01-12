@@ -13,6 +13,11 @@ ENV DOCKER_ARCH=${DOCKER_ARCH}
 ENV BUILD_ARCH=${BUILD_ARCH}
 
 ENV BUILD_TARGET=${BUILD_ARCH}-unknown-linux-gnu
+# For native-tls
+ENV OPENSSL_DIR=/usr/local/build/$BUILD_TARGET
+# For rdkafka
+ENV OPENSSL_ROOT_DIR=/usr/local/build/$BUILD_TARGET
+ENV OPENSSL_STATIC=1
 
 RUN apt-get update \
     && apt-get install --no-install-recommends -y \
@@ -31,7 +36,9 @@ WORKDIR /work
 FROM getsentry/sentry-cli:1 AS sentry-cli
 FROM relay-deps AS relay-builder
 
-ARG RELAY_FEATURES=ssl,processing,crash-handler
+# ssl and processing are required for basic functionality in onprem
+# kafka-ssl is for free since we already have OpenSSL because we are on Linux
+ARG RELAY_FEATURES=ssl,kafka-ssl,processing,crash-handler
 ENV RELAY_FEATURES=${RELAY_FEATURES}
 
 COPY --from=sentry-cli /bin/sentry-cli /bin/sentry-cli
