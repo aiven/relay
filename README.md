@@ -239,6 +239,24 @@ port in the DSN:
 http://<key>@localhost:3001/<id>
 ```
 
+### Docker images
+
+This repository contains a Dockerfile which can be used to build an image to run
+Relay:
+
+```bash
+docker build -t my-relay-image .
+```
+
+Images built from this repository are also published to Github Container
+Registry and can be pulled from there:
+
+```bash
+docker pull ghcr.io/aiven/relay:<git commit-SHA or tag>
+```
+
+This is specific to the fork https://github.com/aiven/relay.
+
 ### Release Management
 
 We use [craft](https://github.com/getsentry/craft) to release new versions.
