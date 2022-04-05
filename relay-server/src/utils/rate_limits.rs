@@ -103,6 +103,7 @@ fn infer_event_category(item: &Item) -> Option<DataCategory> {
         ItemType::MetricBuckets => None,
         ItemType::FormData => None,
         ItemType::UserReport => None,
+        ItemType::Profile => None,
         // the following items are "internal" item types.  From the perspective of the SDK
         // the use the "internal" data category however this data category is in fact never
         // supposed to be emitted by relay as internal items must not be rate limited.  As
@@ -240,7 +241,7 @@ impl Enforcement {
     /// Relay generally does not emit outcomes for sessions, so those are skipped.
     pub fn track_outcomes(self, envelope: &Envelope, scoping: &Scoping) {
         // Do not report outcomes for sessions.
-        for limit in std::array::IntoIter::new([self.event, self.attachments]) {
+        for limit in [self.event, self.attachments] {
             if limit.is_active() {
                 let timestamp = relay_common::instant_to_date_time(envelope.meta().start_time());
                 OutcomeAggregator::from_registry().do_send(TrackOutcome {

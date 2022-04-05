@@ -40,6 +40,11 @@ pub fn check_envelope_size_limits(config: &Config, envelope: &Envelope) -> bool 
             ItemType::Metrics => (),
             ItemType::MetricBuckets => (),
             ItemType::ClientReport => client_reports_size += item.len(),
+            ItemType::Profile => {
+                if item.len() > config.max_profile_size() {
+                    return false;
+                }
+            }
         }
     }
 

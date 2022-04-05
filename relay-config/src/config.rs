@@ -363,6 +363,11 @@ impl FromStr for RelayMode {
     }
 }
 
+/// Returns `true` if this value is equal to `Default::default()`.
+fn is_default<T: Default + PartialEq>(t: &T) -> bool {
+    *t == T::default()
+}
+
 /// Checks if we are running in docker.
 fn is_docker() -> bool {
     if fs::metadata("/.dockerenv").is_ok() {
@@ -401,12 +406,6 @@ pub enum ReadinessCondition {
     Always,
 }
 
-impl ReadinessCondition {
-    fn is_default(&self) -> bool {
-        *self == Self::default()
-    }
-}
-
 impl Default for ReadinessCondition {
     fn default() -> Self {
         Self::Authenticated
@@ -431,6 +430,12 @@ pub struct Relay {
     pub tls_identity_path: Option<PathBuf>,
     /// Password for the PKCS12 archive.
     pub tls_identity_password: Option<String>,
+    /// Always override project IDs from the URL and DSN with the identifier used at the upstream.
+    ///
+    /// Enable this setting for Relays used to redirect traffic to a migrated Sentry instance.
+    /// Validation of project identifiers can be safely skipped in these cases.
+    #[serde(skip_serializing_if = "is_default")]
+    pub override_project_ids: bool,
 }
 
 impl Default for Relay {
@@ -443,6 +448,7 @@ impl Default for Relay {
             tls_port: None,
             tls_identity_path: None,
             tls_identity_password: None,
+            override_project_ids: false,
         }
     }
 }
@@ -517,6 +523,8 @@ struct Limits {
     max_api_file_upload_size: ByteSize,
     /// The maximum payload size for chunks
     max_api_chunk_upload_size: ByteSize,
+    /// The maximum payload size for a profile
+    max_profile_size: ByteSize,
     /// The maximum number of threads to spawn for CPU and web work, each.
     ///
     /// The total number of threads spawned will roughly be `2 * max_thread_count + 1`. Defaults to
@@ -556,6 +564,7 @@ impl Default for Limits {
             max_api_payload_size: ByteSize::mebibytes(20),
             max_api_file_upload_size: ByteSize::mebibytes(40),
             max_api_chunk_upload_size: ByteSize::mebibytes(100),
+            max_profile_size: ByteSize::mebibytes(1),
             max_thread_count: num_cpus::get(),
             query_timeout: 30,
             max_connection_rate: 256,
@@ -750,10 +759,14 @@ pub enum KafkaTopic {
     Transactions,
     /// Shared outcomes topic for Relay and Sentry.
     Outcomes,
+    /// Override for billing critical outcomes.
+    OutcomesBilling,
     /// Session health updates.
     Sessions,
     /// Aggregate Metrics.
     Metrics,
+    /// Profiles
+    Profiles,
 }
 
 /// Configuration for topics.
@@ -766,12 +779,16 @@ pub struct TopicAssignments {
     pub attachments: TopicAssignment,
     /// Transaction events topic name.
     pub transactions: TopicAssignment,
-    /// Event outcomes topic name.
+    /// Outcomes topic name.
     pub outcomes: TopicAssignment,
+    /// Outcomes topic name for billing critical outcomes. Defaults to the assignment of `outcomes`.
+    pub outcomes_billing: Option<TopicAssignment>,
     /// Session health topic name.
     pub sessions: TopicAssignment,
     /// Metrics topic name.
     pub metrics: TopicAssignment,
+    /// Stacktrace topic name
+    pub profiles: TopicAssignment,
 }
 
 impl TopicAssignments {
@@ -782,8 +799,10 @@ impl TopicAssignments {
             KafkaTopic::Events => &self.events,
             KafkaTopic::Transactions => &self.transactions,
             KafkaTopic::Outcomes => &self.outcomes,
+            KafkaTopic::OutcomesBilling => self.outcomes_billing.as_ref().unwrap_or(&self.outcomes),
             KafkaTopic::Sessions => &self.sessions,
             KafkaTopic::Metrics => &self.metrics,
+            KafkaTopic::Profiles => &self.profiles,
         }
     }
 }
@@ -795,8 +814,10 @@ impl Default for TopicAssignments {
             attachments: "ingest-attachments".to_owned().into(),
             transactions: "ingest-transactions".to_owned().into(),
             outcomes: "outcomes".to_owned().into(),
+            outcomes_billing: None,
             sessions: "ingest-sessions".to_owned().into(),
             metrics: "ingest-metrics".to_owned().into(),
+            profiles: "profiles".to_owned().into(),
         }
     }
 }
@@ -1182,7 +1203,7 @@ mod config_relay_info {
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct AuthConfig {
     /// Controls responses from the readiness health check endpoint based on authentication.
-    #[serde(default, skip_serializing_if = "ReadinessCondition::is_default")]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub ready: ReadinessCondition,
 
     /// Statically authenticated downstream relays.
@@ -1525,6 +1546,13 @@ impl Config {
         self.values.relay.tls_identity_password.as_deref()
     }
 
+    /// Returns `true` when project IDs should be overriden rather than validated.
+    ///
+    /// Defaults to `false`, which requires project ID validation.
+    pub fn override_project_ids(&self) -> bool {
+        self.values.relay.override_project_ids
+    }
+
     /// Returns `true` if Relay requires authentication for readiness.
     ///
     /// See [`ReadinessCondition`] for more information.
@@ -1772,6 +1800,11 @@ impl Config {
     /// Returns the maximum payload size for chunks
     pub fn max_api_chunk_upload_size(&self) -> usize {
         self.values.limits.max_api_chunk_upload_size.as_bytes()
+    }
+
+    /// Returns the maximum payload size for a profile
+    pub fn max_profile_size(&self) -> usize {
+        self.values.limits.max_profile_size.as_bytes()
     }
 
     /// Returns the maximum number of active requests

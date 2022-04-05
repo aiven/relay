@@ -7,6 +7,7 @@ use actix::prelude::*;
 
 use failure::Fail;
 use float_ord::FloatOrd;
+use hash32::{FnvHasher, Hasher};
 use relay_common_actors::controller::{Controller, Shutdown};
 use serde::{Deserialize, Serialize};
 
@@ -14,6 +15,9 @@ use relay_common::{MonotonicResult, ProjectKey, UnixTimestamp};
 
 use crate::statsd::{MetricCounters, MetricGauges, MetricHistograms, MetricSets, MetricTimers};
 use crate::{Metric, MetricType, MetricUnit, MetricValue};
+
+/// Interval for the flush cycle of the [`Aggregator`].
+const FLUSH_INTERVAL: Duration = Duration::from_millis(100);
 
 /// A snapshot of values within a [`Bucket`].
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
@@ -137,6 +141,13 @@ impl DistributionValue {
     /// ```
     pub fn len(&self) -> Count {
         self.length
+    }
+
+    /// Returns the size of the map used to store the distribution.
+    ///
+    /// This is only relevant for internal metrics.
+    fn internal_size(&self) -> usize {
+        self.values.len()
     }
 
     /// Returns `true` if the map contains no elements.
@@ -498,6 +509,17 @@ impl BucketValue {
             Self::Gauge(_) => MetricType::Gauge,
         }
     }
+
+    /// Returns the number of values needed to encode the bucket (a measure of bucket
+    /// complexity).
+    pub fn relative_size(&self) -> usize {
+        match self {
+            Self::Counter(_) => 1,
+            Self::Set(s) => s.len(),
+            Self::Gauge(_) => 5,
+            Self::Distribution(m) => m.internal_size(),
+        }
+    }
 }
 
 impl From<MetricValue> for BucketValue {
@@ -740,6 +762,8 @@ pub struct AggregatorConfig {
     /// Defaults to `30` seconds. Before sending an aggregated bucket, this is the time Relay waits
     /// for buckets that are being reported in real time. This should be higher than the
     /// `debounce_delay`.
+    ///
+    /// Relay applies up to a full `bucket_interval` of additional jitter after the initial delay to spread out flushing real time buckets.
     pub initial_delay: u64,
 
     /// The delay in seconds to wait before flushing a backdated buckets.
@@ -747,6 +771,9 @@ pub struct AggregatorConfig {
     /// Defaults to `10` seconds. Metrics can be sent with a past timestamp. Relay wait this time
     /// before sending such a backdated bucket to the upsteam. This should be lower than
     /// `initial_delay`.
+    ///
+    /// Unlike `initial_delay`, the debounce delay starts with the exact moment the first metric
+    /// is added to a backdated bucket.
     pub debounce_delay: u64,
 
     /// The age in seconds of the oldest allowed bucket timestamp.
@@ -811,21 +838,38 @@ impl AggregatorConfig {
     ///
     /// Recent buckets are flushed after a grace period of `initial_delay`. Backdated buckets, that
     /// is, buckets that lie in the past, are flushed after the shorter `debounce_delay`.
-    fn get_flush_time(&self, bucket_timestamp: UnixTimestamp) -> Instant {
+    fn get_flush_time(&self, bucket_timestamp: UnixTimestamp, project_key: ProjectKey) -> Instant {
         let now = Instant::now();
+        let mut flush = None;
 
         if let MonotonicResult::Instant(instant) = bucket_timestamp.to_instant() {
             let bucket_end = instant + self.bucket_interval();
             let initial_flush = bucket_end + self.initial_delay();
+            // If the initial flush is still pending, use that.
             if initial_flush > now {
-                // If the initial flush is still pending, use that.
-                return initial_flush;
+                // Shift deterministically within one bucket interval based on the project key. This
+                // distributes buckets over time while also flushing all buckets of the same project
+                // key together.
+                let mut hasher = FnvHasher::default();
+                hasher.write(project_key.as_str().as_bytes());
+                let shift_millis = u64::from(hasher.finish()) % (self.bucket_interval * 1000);
+
+                flush = Some(initial_flush + Duration::from_millis(shift_millis));
             }
         }
 
+        let delay = UnixTimestamp::now().as_secs() as i64 - bucket_timestamp.as_secs() as i64;
+        relay_statsd::metric!(
+            histogram(MetricHistograms::BucketsDelay) = delay as f64,
+            backedated = if flush.is_none() { "true" } else { "false" },
+        );
+
         // If the initial flush time has passed or cannot be represented, debounce future flushes
         // with the `debounce_delay` starting now.
-        now + self.debounce_delay()
+        match flush {
+            Some(initial_flush) => initial_flush,
+            None => now + self.debounce_delay(),
+        }
     }
 }
 
@@ -923,6 +967,11 @@ impl Message for FlushBuckets {
     type Result = Result<(), Vec<Bucket>>;
 }
 
+enum AggregatorState {
+    Running,
+    ShuttingDown,
+}
+
 /// A collector of [`Metric`] submissions.
 ///
 /// # Aggregation
@@ -950,6 +999,9 @@ impl Message for FlushBuckets {
 /// Metrics with a recent timestamp are given a longer grace period than backdated metrics, which
 /// are flushed after a shorter debounce delay. See [`AggregatorConfig`] for configuration options.
 ///
+/// Internally, the aggregator maintains a continuous flush cycle every 100ms. It guarantees that
+/// all elapsed buckets belonging to the same [`ProjectKey`] are flushed together.
+///
 /// Receivers must implement a handler for the [`FlushBuckets`] message:
 ///
 /// ```
@@ -975,6 +1027,7 @@ pub struct Aggregator {
     config: AggregatorConfig,
     buckets: HashMap<BucketKey, QueuedBucket>,
     receiver: Recipient<FlushBuckets>,
+    state: AggregatorState,
 }
 
 impl Aggregator {
@@ -987,6 +1040,7 @@ impl Aggregator {
             config,
             buckets: HashMap::new(),
             receiver,
+            state: AggregatorState::Running,
         }
     }
 
@@ -999,6 +1053,7 @@ impl Aggregator {
         value: T,
     ) -> Result<(), AggregateMetricsError> {
         let timestamp = key.timestamp;
+        let project_key = key.project_key;
 
         match self.buckets.entry(key) {
             Entry::Occupied(mut entry) => {
@@ -1021,7 +1076,7 @@ impl Aggregator {
                     metric_name = &entry.key().metric_name
                 );
 
-                let flush_at = self.config.get_flush_time(timestamp);
+                let flush_at = self.config.get_flush_time(timestamp, project_key);
                 entry.insert(QueuedBucket::new(flush_at, value.into()));
             }
         }
@@ -1040,7 +1095,6 @@ impl Aggregator {
         relay_statsd::metric!(
             counter(MetricCounters::InsertMetric) += 1,
             metric_type = metric.value.ty().as_str(),
-            metric_name = &metric.name
         );
         let key = BucketKey {
             project_key,
@@ -1095,10 +1149,12 @@ impl Aggregator {
     /// Pop and return the buckets that are eligible for flushing out according to bucket interval.
     ///
     /// Note that this function is primarily intended for tests.
-    pub fn pop_flush_buckets(&mut self, force: bool) -> HashMap<ProjectKey, Vec<Bucket>> {
+    pub fn pop_flush_buckets(&mut self) -> HashMap<ProjectKey, Vec<Bucket>> {
         relay_statsd::metric!(gauge(MetricGauges::Buckets) = self.buckets.len() as u64);
 
         let mut buckets = HashMap::<ProjectKey, Vec<Bucket>>::new();
+
+        let force = matches!(&self.state, AggregatorState::ShuttingDown);
 
         relay_statsd::metric!(timer(MetricTimers::BucketsScanDuration), {
             let bucket_interval = self.config.bucket_interval;
@@ -1122,8 +1178,8 @@ impl Aggregator {
     ///
     /// If the receiver returns buckets, they are merged back into the cache.
     /// If `force` is true, flush all buckets unconditionally and do not attempt to merge back.
-    fn try_flush(&mut self, context: &mut <Self as Actor>::Context, force: bool) {
-        let flush_buckets = self.pop_flush_buckets(force);
+    fn try_flush(&mut self, context: &mut <Self as Actor>::Context) {
+        let flush_buckets = self.pop_flush_buckets();
 
         if flush_buckets.is_empty() {
             return;
@@ -1132,7 +1188,6 @@ impl Aggregator {
         relay_log::trace!("flushing {} projects to receiver", flush_buckets.len());
 
         let mut total_bucket_count = 0u64;
-        let merge_back = !force;
         for (project_key, project_buckets) in flush_buckets.into_iter() {
             let bucket_count = project_buckets.len() as u64;
             relay_statsd::metric!(
@@ -1140,22 +1195,27 @@ impl Aggregator {
             );
             total_bucket_count += bucket_count;
 
+            let size_statsd_metrics: Vec<_> = project_buckets
+                .iter()
+                .map(|bucket| (bucket.value.ty(), bucket.value.relative_size()))
+                .collect();
+
             self.receiver
                 .send(FlushBuckets::new(project_key, project_buckets))
                 .into_actor(self)
                 .and_then(move |result, slf, _ctx| {
                     if let Err(buckets) = result {
-                        if merge_back {
-                            relay_log::trace!(
-                                "returned {} buckets from receiver, merging back",
-                                buckets.len()
-                            );
-                            slf.merge_all(project_key, buckets).ok();
-                        } else {
-                            // NOTE: This means we drop buckets if the project state is expired.
-                            relay_log::trace!(
-                                "returned {} buckets from receiver, dropping",
-                                buckets.len()
+                        relay_log::trace!(
+                            "returned {} buckets from receiver, merging back",
+                            buckets.len()
+                        );
+                        slf.merge_all(project_key, buckets).ok();
+                    } else {
+                        for (bucket_type, bucket_relative_size) in size_statsd_metrics {
+                            relay_statsd::metric!(
+                                histogram(MetricHistograms::BucketRelativeSize) =
+                                    bucket_relative_size as u64,
+                                metric_type = bucket_type.as_str(),
                             );
                         }
                     }
@@ -1189,8 +1249,8 @@ impl Actor for Aggregator {
         Controller::subscribe(ctx.address());
 
         // TODO: Consider a better approach than busy polling
-        ctx.run_interval(Duration::from_millis(500), |slf, context| {
-            slf.try_flush(context, false);
+        ctx.run_interval(FLUSH_INTERVAL, |slf, context| {
+            slf.try_flush(context);
         });
     }
 
@@ -1212,13 +1272,24 @@ impl SystemService for Aggregator {}
 impl Handler<Shutdown> for Aggregator {
     type Result = Result<(), ()>;
 
-    fn handle(&mut self, message: Shutdown, context: &mut Self::Context) -> Self::Result {
+    fn handle(&mut self, message: Shutdown, _context: &mut Self::Context) -> Self::Result {
         if message.timeout.is_some() {
             relay_log::trace!("Shutting down...");
-            // is graceful shutdown
-            self.try_flush(context, true);
+            self.state = AggregatorState::ShuttingDown;
         }
         Ok(())
+    }
+}
+
+impl Drop for Aggregator {
+    fn drop(&mut self) {
+        let remaining_buckets = self.buckets.len();
+        if remaining_buckets > 0 {
+            relay_log::error!("Metrics aggregator dropping {} buckets", remaining_buckets);
+            relay_statsd::metric!(
+                counter(MetricCounters::BucketsDropped) += remaining_buckets as i64
+            );
+        }
     }
 }
 
@@ -1679,8 +1750,8 @@ mod tests {
 
         let buckets: Vec<_> = aggregator
             .buckets
-            .into_iter()
-            .map(|(k, e)| (k, e.value)) // skip flush times, they are different every time
+            .iter()
+            .map(|(k, e)| (k, &e.value)) // skip flush times, they are different every time
             .collect();
 
         insta::assert_debug_snapshot!(buckets, @r###"
@@ -1727,8 +1798,8 @@ mod tests {
 
         let mut buckets: Vec<_> = aggregator
             .buckets
-            .into_iter()
-            .map(|(k, e)| (k, e.value)) // skip flush times, they are different every time
+            .iter()
+            .map(|(k, e)| (k, &e.value)) // skip flush times, they are different every time
             .collect();
 
         buckets.sort_by(|a, b| a.0.timestamp.cmp(&b.0.timestamp));
@@ -1869,8 +1940,9 @@ mod tests {
                     Ok(())
                 })
                 .and_then(|_| {
-                    // Wait until flush delay has passed
-                    relay_test::delay(Duration::from_millis(1500)).map_err(|_| ())
+                    // Wait until flush delay has passed. It is up to 2s: 1s for the current bucket
+                    // and 1s for the flush shift. Adding 100ms buffer.
+                    relay_test::delay(Duration::from_millis(2100)).map_err(|_| ())
                 })
                 .and_then(|_| {
                     // After the flush delay has passed, the receiver should have the bucket:

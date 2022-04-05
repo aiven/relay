@@ -39,6 +39,9 @@ workspace with multiple features, so when running building or running tests
 always make sure to pass the `--all` and `--all-features` flags.
 The `processing` feature additionally requires a C compiler and CMake.
 
+To install the development environment, librdkafka must be installed and on the
+path. On macOS, we require to install it with `brew install librdkafka`, as the installation script uses `brew --prefix` to determine the correct location.
+
 We use VSCode for development. This repository contains settings files
 configuring code style, linters, and useful features. When opening the project
 for the first time, make sure to _install the Recommended Extensions_, as they
@@ -55,9 +58,10 @@ development:
   also performed in CI.
 - `make clean`: Removes all build artifacts, the virtualenv and cached files.
 
-For a lot of tests you will need Redis and Kafka running in their respective
-default configuration. `sentry devservices` from
-[sentry](https://github.com/getsentry/sentry) does this for you.
+Integration tests require Redis and Kafka running in their default
+configuration. The most convenient way to get all required services is via
+[`sentry devservices`](https://develop.sentry.dev/services/devservices/), which
+requires an up-to-date Sentry development environment.
 
 ### Building and Running
 
@@ -270,3 +274,20 @@ There are two separate projects to publish:
 - **Relay Python library** along with the C-ABI are released from the `py/`
   subfolder. Change into that directory and run `craft prepare` and `craft publish`. We use [Semantic Versioning](https://semver.org/) and release during
   the development cycle.
+
+### Instructions for changelogs
+
+For changes exposed to the _Python package_, add an entry to `py/CHANGELOG.md`. This includes, but is not limited to, event normalization, PII scrubbing, and the protocol.
+For changes to the _Relay server_, please add an entry to `CHANGELOG.md` under the following heading:
+
+1. `Features`: for new user-visible functionality.
+2. `Bug Fixes`: for user-visible bug fixes.
+3. `Internal`: for features and bug fixes in internal operation, especially processing mode.
+
+To the changelog entry, please add a link to this PR (consider a more descriptive message):
+
+```md
+- ${getCleanTitle()}. (${PR_LINK})
+```
+
+If none of the above apply, you can opt out by adding `#skip-changelog` to the PR description.

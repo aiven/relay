@@ -1,5 +1,59 @@
 # Changelog
 
+## Unreleased
+
+**Internal**:
+
+- Remove unused item types. ([#1211](https://github.com/getsentry/relay/pull/1211))
+- Pin click dependency in requirements-dev.txt. ([#1214](https://github.com/getsentry/relay/pull/1214))
+
+## 22.3.0
+
+**Features**:
+
+- Tag transaction metrics by user satisfaction. ([#1197](https://github.com/getsentry/relay/pull/1197))
+
+**Bug Fixes**:
+
+- CVE-2022-24713: Prevent denial of service through untrusted regular expressions used for PII scrubbing. ([#1207](https://github.com/getsentry/relay/pull/1207))
+- Prevent dropping metrics during Relay shutdown if the project is outdated or not cached at time of the shutdown. ([#1205](https://github.com/getsentry/relay/pull/1205))
+- Prevent a potential OOM when validating corrupted or exceptional minidumps. ([#1209](https://github.com/getsentry/relay/pull/1209))
+
+**Internal**:
+
+- Spread out metric aggregation over the aggregation window to avoid concentrated waves of metrics requests to the upstream every 10 seconds. Relay now applies jitter to `initial_delay` to spread out requests more evenly over time. ([#1185](https://github.com/getsentry/relay/pull/1185))
+- Use a randomized Kafka partitioning key for sessions instead of the session ID. ([#1194](https://github.com/getsentry/relay/pull/1194))
+- Add new statsd metrics for bucketing efficiency. ([#1199](https://github.com/getsentry/relay/pull/1199), [#1192](https://github.com/getsentry/relay/pull/1192), [#1200](https://github.com/getsentry/relay/pull/1200))
+- Add a `Profile` `ItemType` to represent the profiling data sent from Sentry SDKs. ([#1179](https://github.com/getsentry/relay/pull/1179))
+
+## 22.2.0
+
+**Features**:
+
+- Add the `relay.override_project_ids` configuration flag to support migrating projects from self-hosted to Sentry SaaS. ([#1175](https://github.com/getsentry/relay/pull/1175))
+
+**Internal**:
+
+- Add an option to dispatch billing outcomes to a dedicated topic. ([#1168](https://github.com/getsentry/relay/pull/1168))
+- Add new `ItemType` to handle profiling data from Specto SDKs. ([#1170](https://github.com/getsentry/relay/pull/1170))
+
+**Bug Fixes**:
+
+- Fix regression in CSP report parsing. ([#1174](https://github.com/getsentry/relay/pull/1174))
+- Ignore replacement_chunks when they aren't used. ([#1180](https://github.com/getsentry/relay/pull/1180))
+
+## 22.1.0
+
+**Features**:
+
+- Flush metrics and outcome aggregators on graceful shutdown. ([#1159](https://github.com/getsentry/relay/pull/1159))
+- Extract metrics from sampled transactions. ([#1161](https://github.com/getsentry/relay/pull/1161))
+
+**Internal**:
+
+- Extract normalized dist as metric. ([#1158](https://github.com/getsentry/relay/pull/1158))
+- Extract transaction user as metric. ([#1164](https://github.com/getsentry/relay/pull/1164))
+
 ## 21.12.0
 
 **Features**:
@@ -9,7 +63,6 @@
 - Metrics extraction config, custom tags. ([#1141](https://github.com/getsentry/relay/pull/1141))
 - Update the user agent parser (uap-core Feb 2020 to Nov 2021). This allows Relay and Sentry to infer more recent browsers, operating systems, and devices in events containing a user agent header. ([#1143](https://github.com/getsentry/relay/pull/1143), [#1145](https://github.com/getsentry/relay/pull/1145))
 - Improvements to Unity OS context parsing ([#1150](https://github.com/getsentry/relay/pull/1150))
-- Flush metrics and outcome aggregators on graceful shutdown. ([#1159](https://github.com/getsentry/relay/pull/1159))
 
 **Bug Fixes**:
 
@@ -27,7 +80,6 @@
 - Extract session metrics from aggregate sessions. ([#1140](https://github.com/getsentry/relay/pull/1140))
 - Prefix names of extracted metrics by `sentry.sessions.` or `sentry.transactions.`. ([#1147](https://github.com/getsentry/relay/pull/1147))
 - Extract transaction duration as metric. ([#1148](https://github.com/getsentry/relay/pull/1148))
-- Extract normalized dist as metric. ([#1158](https://github.com/getsentry/relay/pull/1158))
 
 ## 21.11.0
 

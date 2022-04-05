@@ -1,5 +1,6 @@
 use relay_statsd::{CounterMetric, GaugeMetric, HistogramMetric, SetMetric, TimerMetric};
 
+/// Set metrics for Relay Metrics.
 pub enum MetricSets {
     /// Count the number of unique buckets created.
     ///
@@ -36,6 +37,11 @@ pub enum MetricCounters {
     ///
     /// Tagged by metric type and name.
     MergeMiss,
+
+    /// Incremented every time a bucket is dropped.
+    ///
+    /// This should only happen when a project state is invalid during graceful shutdown.
+    BucketsDropped,
 }
 
 impl CounterMetric for MetricCounters {
@@ -44,6 +50,7 @@ impl CounterMetric for MetricCounters {
             Self::InsertMetric => "metrics.insert",
             Self::MergeHit => "metrics.buckets.merge.hit",
             Self::MergeMiss => "metrics.buckets.merge.miss",
+            Self::BucketsDropped => "metrics.buckets.dropped",
         }
     }
 }
@@ -67,6 +74,7 @@ impl TimerMetric for MetricTimers {
 }
 
 /// Histogram metrics for Relay Metrics.
+#[allow(clippy::enum_variant_names)]
 pub enum MetricHistograms {
     /// The total number of metric buckets flushed in a cycle across all projects.
     BucketsFlushed,
@@ -77,6 +85,24 @@ pub enum MetricHistograms {
     /// is logged for each project that is being flushed. The count of the histogram values is
     /// equivalent to the number of projects being flushed.
     BucketsFlushedPerProject,
+
+    /// The number of metric elements in the bucket.
+    ///
+    /// BucketRelativeSize measures how many distinct values are in a bucket and therefore
+    /// BucketRelativeSize gives you a measurement of the bucket size and complexity.
+    BucketRelativeSize,
+
+    /// The reporting delay at which a bucket arrives in Relay.
+    ///
+    /// A positive delay indicates the bucket arrives after its stated timestamp. Large delays
+    /// indicate backdating, particularly all delays larger than `bucket_interval + initial_delay`.
+    /// Negative delays indicate that the bucket is dated into the future, likely due to clock drift
+    /// on the client.
+    ///
+    /// This metric is tagged with:
+    ///  - `backdated`: A flag indicating whether the metric was reported within the `initial_delay`
+    ///    time period (`false`) or after the initial delay has expired (`true`).
+    BucketsDelay,
 }
 
 impl HistogramMetric for MetricHistograms {
@@ -84,6 +110,8 @@ impl HistogramMetric for MetricHistograms {
         match *self {
             Self::BucketsFlushed => "metrics.buckets.flushed",
             Self::BucketsFlushedPerProject => "metrics.buckets.flushed_per_project",
+            Self::BucketRelativeSize => "metrics.buckets.relative_bucket_size",
+            Self::BucketsDelay => "metrics.buckets.delay",
         }
     }
 }

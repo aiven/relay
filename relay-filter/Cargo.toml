@@ -4,7 +4,7 @@ authors = ["Sentry <oss@sentry.io>"]
 description = "Inbound data filters for Relay"
 homepage = "https://getsentry.github.io/relay/"
 repository = "https://github.com/getsentry/relay"
-version = "21.12.0"
+version = "22.3.0"
 edition = "2018"
 license-file = "../LICENSE"
 publish = false
@@ -13,7 +13,7 @@ publish = false
 globset = "0.4.5"
 ipnetwork = "0.14.0"
 lazy_static = "1.4.0"
-regex = "1.5.4"
+regex = "1.5.5"
 relay-general = { path = "../relay-general" }
 relay-common = { path = "../relay-common" }
 serde = { version = "1.0.114", features = ["derive"] }

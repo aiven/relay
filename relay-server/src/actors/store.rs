@@ -24,7 +24,7 @@ use relay_statsd::metric;
 
 use crate::envelope::{AttachmentType, Envelope, Item, ItemType};
 use crate::service::{ServerError, ServerErrorKind};
-use crate::statsd::RelayCounters;
+use crate::statsd::{RelayCounters, RelayHistograms};
 use crate::utils::{CaptureErrorContext, ThreadedProducer};
 
 lazy_static::lazy_static! {
@@ -58,6 +58,7 @@ struct Producers {
     transactions: Producer,
     sessions: Producer,
     metrics: Producer,
+    profiles: Producer,
 }
 
 impl Producers {
@@ -67,13 +68,14 @@ impl Producers {
             KafkaTopic::Attachments => Some(&self.attachments),
             KafkaTopic::Events => Some(&self.events),
             KafkaTopic::Transactions => Some(&self.transactions),
-            KafkaTopic::Outcomes => {
+            KafkaTopic::Outcomes | KafkaTopic::OutcomesBilling => {
                 // should be unreachable
                 relay_log::error!("attempted to send data to outcomes topic from store forwarder. there is another actor for that.");
                 None
             }
             KafkaTopic::Sessions => Some(&self.sessions),
             KafkaTopic::Metrics => Some(&self.metrics),
+            KafkaTopic::Profiles => Some(&self.profiles),
         }
     }
 }
@@ -130,6 +132,7 @@ impl StoreForwarder {
             transactions: make_producer(&*config, &mut reused_producers, KafkaTopic::Transactions)?,
             sessions: make_producer(&*config, &mut reused_producers, KafkaTopic::Sessions)?,
             metrics: make_producer(&*config, &mut reused_producers, KafkaTopic::Metrics)?,
+            profiles: make_producer(&*config, &mut reused_producers, KafkaTopic::Profiles)?,
         };
 
         Ok(Self { config, producers })
@@ -137,6 +140,10 @@ impl StoreForwarder {
 
     fn produce(&self, topic: KafkaTopic, message: KafkaMessage) -> Result<(), StoreError> {
         let serialized = message.serialize()?;
+        metric!(
+            histogram(RelayHistograms::KafkaMessageSize) = serialized.len() as u64,
+            variant = message.variant()
+        );
         let key = message.key();
 
         let record = BaseRecord::to(self.config.kafka_topic_name(topic))
@@ -408,6 +415,28 @@ impl StoreForwarder {
         );
         Ok(())
     }
+
+    fn produce_profile(
+        &self,
+        organization_id: u64,
+        project_id: ProjectId,
+        start_time: Instant,
+        item: &Item,
+    ) -> Result<(), StoreError> {
+        let message = ProfileKafkaMessage {
+            organization_id,
+            project_id,
+            received: UnixTimestamp::from_instant(start_time).as_secs(),
+            payload: item.payload(),
+        };
+        relay_log::trace!("Sending profile to Kafka");
+        self.produce(KafkaTopic::Profiles, KafkaMessage::Profile(message))?;
+        metric!(
+            counter(RelayCounters::ProcessingMessageProduced) += 1,
+            event_type = "profile"
+        );
+        Ok(())
+    }
 }
 
 /// StoreMessageForwarder is an async actor since the only thing it does is put the messages
@@ -574,6 +603,14 @@ struct MetricKafkaMessage {
     tags: BTreeMap<String, String>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct ProfileKafkaMessage {
+    organization_id: u64,
+    project_id: ProjectId,
+    received: u64,
+    payload: Bytes,
+}
+
 /// An enum over all possible ingest messages.
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -585,9 +622,22 @@ enum KafkaMessage {
     UserReport(UserReportKafkaMessage),
     Session(SessionKafkaMessage),
     Metric(MetricKafkaMessage),
+    Profile(ProfileKafkaMessage),
 }
 
 impl KafkaMessage {
+    fn variant(&self) -> &'static str {
+        match self {
+            KafkaMessage::Event(_) => "event",
+            KafkaMessage::Attachment(_) => "attachment",
+            KafkaMessage::AttachmentChunk(_) => "attachment_chunk",
+            KafkaMessage::UserReport(_) => "user_report",
+            KafkaMessage::Session(_) => "session",
+            KafkaMessage::Metric(_) => "metric",
+            KafkaMessage::Profile(_) => "profile",
+        }
+    }
+
     /// Returns the partitioning key for this kafka message determining.
     fn key(&self) -> [u8; 16] {
         let mut uuid = match self {
@@ -595,8 +645,9 @@ impl KafkaMessage {
             Self::Attachment(message) => message.event_id.0,
             Self::AttachmentChunk(message) => message.event_id.0,
             Self::UserReport(message) => message.event_id.0,
-            Self::Session(message) => message.session_id,
-            Self::Metric(_message) => Uuid::nil(), // TODO(ja): Determine a partitioning key
+            Self::Session(_message) => Uuid::nil(), // Explicit random partitioning for sessions
+            Self::Metric(_message) => Uuid::nil(),  // TODO(ja): Determine a partitioning key
+            Self::Profile(_message) => Uuid::nil(),
         };
 
         if uuid.is_nil() {
@@ -705,6 +756,12 @@ impl Handler<StoreEnvelope> for StoreForwarder {
                 ItemType::MetricBuckets => {
                     self.produce_metrics(scoping.organization_id, scoping.project_id, item)?
                 }
+                ItemType::Profile => self.produce_profile(
+                    scoping.organization_id,
+                    scoping.project_id,
+                    start_time,
+                    item,
+                )?,
                 _ => {}
             }
         }
